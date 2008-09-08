@@ -1,0 +1,13 @@
+This is a mirror of http://www.vim.org/scripts/script.php?script_id=2372
+
+Support Automatic functions like Emacs for Verilog HDL
+Feature list:
+1) Auto Argument (the same as Emacs)
+2) Auto Instance (power than Emacs)
+3) Auto Define Signals
+4) Auto unit delay "<=" to "<= #`FFD"
+5) Auto always block
+6) Auto header
+7) Auto comment
+My blog: http://blog.sina.com.cn/arrowroothover
+My E-mail: arrowroothover@hotmail.com
