@@ -1,7 +1,7 @@
 " Vim Plugin for Verilog Code Automactic Generation
 " Language:     Verilog
 " Maintainer:   Gavin Ge <arrowroothover@hotmail.com>
-" Version:      1.00
+" Version:      1.10
 " Last Update:  Mon Sept 8 2008
 " For version 7.x or above
 
@@ -13,17 +13,35 @@ if exists("b:vlog_plugin")
 endif
 let b:vlog_plugin = 1
 
-iabbrev <= <= #FFD
+iabbrev <= <= #`FFD
+
+if exists("b:vlog_company") == 0
+   let b:vlog_company = $USER
+endif
+if exists("b:vlog_max_col") == 0
+   let b:vlog_max_col = 40
+endif
+if exists("b:vlog_arg_margin") == 0
+   let b:vlog_arg_margin = "    "
+endif
+if exists("b:vlog_inst_margin") == 0
+   let b:vlog_inst_margin = "        "
+endif
 
 amenu &Verilog.&Header          :call AddHeader()<CR>
 amenu &Verilog.&Comment         :call AddComment()<CR>
+amenu &Verilog.-Automatic-      :
 amenu &Verilog.Auto&Argument    :call AutoArg()<CR>
 amenu &Verilog.Auto&Instance    :call AutoInst()<CR>
 amenu &Verilog.Auto&Define      :call AutoDef()<CR>
-amenu &Verilog.&KillAuto        :call AutoKillAuto()<CR>
+amenu &Verilog.Auto&Sense       :call AutoSense()<CR>
+amenu &Verilog.-Kill-           :
+amenu &Verilog.&KillAuto        :call KillAuto()<CR>
 amenu &Verilog.KillAutoArg      :call KillAutoArg()<CR>
 amenu &Verilog.KillAutoInst     :call KillAutoInst()<CR>
 amenu &Verilog.KillAutoDef      :call KillAutoDef()<CR>
+amenu &Verilog.KillAutoSense    :call KillAutoSense()<CR>
+amenu &Verilog.-Add\ Always\ Block-                              :
 amenu &Verilog.Always\ with\ posedge\ clock\ and\ posedge\ reset :call AddAlways("posedge", "posedge")<CR>
 amenu &Verilog.Always\ with\ posedge\ clock\ and\ negedge\ reset :call AddAlways("posedge", "negedge")<CR>
 amenu &Verilog.Always\ with\ negedge\ clock\ and\ posedge\ reset :call AddAlways("negedge", "posedge")<CR>
@@ -45,7 +63,7 @@ command Al :call AddAlways("", "")
 "===============================================================
 function AddHeader()
   call append(0,  "//")
-  call append(1,  "// Created by         :Marvell(Shanghai)Ltd.")
+  call append(1,  "// Created by         :".b:vlog_company)
   call append(2,  "// Filename           :".expand("%"))
   call append(3,  "// Author             :".$USER."(RDC)")
   call append(4,  "// Created On         :".strftime("%Y-%m-%d %H:%M"))
@@ -122,39 +140,175 @@ function AddAlways(clk_edge, rst_edge)
 endfunction
 
 "===============================================================
+"        Update Current Buffer
+"===============================================================
+function UpdateBuf(new_lines)
+   if len(a:new_lines) < line("$")
+      for line_index in range(1, line("$"), 1)
+         if line_index > len(a:new_lines)
+            call setline(line_index, "")
+         else
+            call setline(line_index, a:new_lines[line_index-1])
+         endif
+      endfor
+   else
+      for line_index in range(1, len(a:new_lines), 1)
+         call setline(line_index, a:new_lines[line_index-1])
+      endfor
+   endif
+endfunction
+
+"===============================================================
+"        Get Instance Name and its Path from Comments
+"===============================================================
+function GetInsts()
+   let insts = {}
+   for line in getline(1, line("$"))
+      if line =~ '^\s*//\s*\<Instance\>:'
+         let line = substitute(line, '^\s*//\s*\<Instance\>:\s*', "", "")
+         let line = substitute(line, '\s*$', "", "")
+         let insts_name = substitute(line, '^.*/', "", "")
+         let insts_name = substitute(insts_name, '\.v$', "", "")
+         call extend(insts, {insts_name : line})
+      endif
+   endfor
+   return insts
+endfunction
+
+"===============================================================
+"       Remove Comments and Functions from Current Buffer
+"===============================================================
+function Filter(lines)
+   let aft_filter = []
+   let line_index = 1
+   while line_index <= len(a:lines)
+      let line = a:lines[line_index-1]
+      let line = substitute(line, '//.*$', "", "")
+      if line =~ '^.*/\*' && line !~ '\*/.*$'
+         let line = substitute(line, '/\*.*$', "", "")
+         call add(aft_filter, line)
+         let line_index = line_index + 1
+         let line = a:lines[line_index-1]
+         while line !~ '\*/.*$'
+            let line_index = line_index + 1
+            let line = a:lines[line_index-1]
+         endwhile
+      elseif line =~ '^\s*\<function\>'
+         let line_index = line_index + 1
+         let line = a:lines[line_index-1]
+         while line !~ '^\s*\<endfunction\>'
+            let line_index = line_index + 1
+            let line = a:lines[line_index-1]
+         endwhile
+      elseif line =~ '^\s*\<endmodule\>'
+         call add(aft_filter, line)
+         break
+      else
+         if line !~ '^.*/\*'
+            let line = substitute(line, '^.*\*/', "", "")
+         endif
+         let line = substitute(line, '^\s*\<endfunction\>', "", "")
+         let line_index = line_index + 1
+         if line != ""
+            call add(aft_filter, line)
+         endif
+      endif
+   endwhile
+   return aft_filter
+endfunction
+
+"===============================================================
+"        Get Inputs and Ouputs from a Instance
+"===============================================================
+function GetIO(lines, inst_input, inst_output)
+   let max_len = []
+   let prefix_max_len = 0
+   let suffix_max_len = 0
+   for line_inst in a:lines
+      if line_inst =~ '^\s*\<input\>.*\['
+         let line_inst = substitute(line_inst, '^\s*\<input\>', "", "")
+         let line_inst = substitute(line_inst, '\s*[;,)].*$', "", "")
+         let port_name = matchstr(line_inst, '\]\s*\w\+$')
+         let port_name = substitute(port_name, '^\]\s*', "", "")
+         let line_inst = substitute(line_inst, '\]\s*\w\+$', "]", "")
+         let port_width = substitute(line_inst, '^.*\[', "[", "")
+         if prefix_max_len < len(port_name)
+            let prefix_max_len = len(port_name)
+         endif
+         if suffix_max_len < (len(port_name) + len(port_width))
+            let suffix_max_len = len(port_name) + len(port_width)
+         endif
+         call extend(a:inst_input, {port_name : port_width}, "force")
+      elseif line_inst =~ '^\s*\<input\>'
+         let line_inst = substitute(line_inst, '^\s*\<input\>', "", "")
+         let line_inst = substitute(line_inst, '\s*[;,)].*$', "", "")
+         let port_name = matchstr(line_inst, '\s\w\+$')
+         let port_name = substitute(port_name, '^\s', "", "")
+         if prefix_max_len < len(port_name)
+            let prefix_max_len = len(port_name)
+         endif
+         if suffix_max_len < len(port_name)
+            let suffix_max_len = len(port_name)
+         endif
+         call extend(a:inst_input, {port_name : ''}, "force")
+      elseif line_inst =~ '^\s*\(\<output\>\|\<inout\>\)\>.*\['
+         let line_inst = substitute(line_inst, '^\s*\(\<output\>\|\<inout\>\)', "", "")
+         let line_inst = substitute(line_inst, '\s*[;,)].*$', "", "")
+         let port_name = matchstr(line_inst, '\]\s*\w\+$')
+         let port_name = substitute(port_name, '^\]\s*', "", "")
+         let line_inst = substitute(line_inst, '\]\s*\w\+$', "]", "")
+         let port_width = substitute(line_inst, '^.*\[', "[", "")
+         if prefix_max_len < len(port_name)
+            let prefix_max_len = len(port_name)
+         endif
+         if suffix_max_len < (len(port_name) + len(port_width))
+            let suffix_max_len = len(port_name) + len(port_width)
+         endif
+         call extend(a:inst_output, {port_name : port_width}, "force")
+      elseif line_inst =~ '^\s*\(\<output\>\|\<inout\>\)'
+         let line_inst = substitute(line_inst, '^\s*\(\<output\>\|\<inout\>\)', "", "")
+         let line_inst = substitute(line_inst, '\s*[;,)].*$', "", "")
+         let port_name = matchstr(line_inst, '\s\w\+$')
+         let port_name = substitute(port_name, '^\s*', "", "")
+         if prefix_max_len < len(port_name)
+            let prefix_max_len = len(port_name)
+         endif
+         if suffix_max_len < len(port_name)
+            let suffix_max_len = len(port_name)
+         endif
+         call extend(a:inst_output, {port_name : ''}, "force")
+      endif
+   endfor
+   call add(max_len, prefix_max_len)
+   call add(max_len, suffix_max_len)
+   return max_len
+endfunction
+"===============================================================
 "        Automatic Argument Generation
 "===============================================================
 function KillAutoArg()
    let aft_kill = []
    let line_index = 1
-   while line_index <= line("$")
+   let line = ""
+   while line_index <= line("$") 
       let line = getline(line_index)
-      if line =~ '^\s*\<module\>' && line=~ '\<\(autoarg\|AUTOARG\)\>\*/\s*$'
+      if line =~ '^\s*\<module\>' && line =~ '\<\(autoarg\|AUTOARG\)\>\*/\s*$'
          call add(aft_kill, line.");")
          let line_index = line_index + 1
-         while line !~ ');\s*$'
+         while line !~ ');\s*$' && line_index < line("$") && line !~ '^\s*\<endmodule\>'
             let line_index = line_index + 1
             let line = getline(line_index)
          endwhile
          let line_index = line_index + 1
+      elseif line =~ '^\s*\<endmodule\>'
+         call add(aft_kill, line)
+         break
       else
          call add(aft_kill, line)
          let line_index = line_index + 1
       endif
    endwhile
-   if len(aft_kill) < line("$")
-      for line_index in range(line("$"))
-         if line_index > len(aft_kill)
-            call setline(line_index, "")
-         else
-            call setline(line_index, aft_kill[line_index-1]
-         endif
-      endfor
-   else
-      for line_index in range(1, len(aft_kill), 1)
-         call setline(line_index, aft_kill[line_index-1])
-      endfor
-   endif
+   call UpdateBuf(aft_kill)
 endfunction
 
 function AutoArg()
@@ -163,7 +317,8 @@ function AutoArg()
    let outputs = []
    let line_index = 1
    call KillAutoArg()
-   for line in getline(1, total_line)
+   let lines = Filter(getline(1, line("$")))
+   for line in lines
       if line =~ '^\s*\<input\>'
          let line = substitute(line, '^\s*\<input\>\s*\(\[.*:.*\]\)*\s*', "", "")
          let line = substitute(line, ';.*$', "", "")
@@ -175,54 +330,49 @@ function AutoArg()
       endif
    endfor
    let line_index = 1
+   let aft_arg = []
    for line in getline(1, total_line)
        if line =~ '/\*.*\<\(autoarg\|AUTOARG\)\>.*'
           let line = substitute(line, ').*', "", "")
-          call setline(line_index, line)
-          call append(line_index, "    //Inputs")
-          let line_index = line_index + 1
-          let input_col = 3
-          let signal_line = "    "
-          if (winwidth(0) < 70)
-              let max_col = 50
-          else
-              let max_col = winwidth(0) - 35
-          endif
+          call add(aft_arg, line)
+          call add(aft_arg, b:vlog_arg_margin."//Inputs")
+          let input_col = len(b:vlog_arg_margin)
+          let signal_line = b:vlog_arg_margin
           for signal_index in range(len(inputs))
-             if input_col > max_col
-                call append(line_index, signal_line)
-                let line_index = line_index + 1
-                let signal_line = "    " . inputs[signal_index] . ", "
+             if input_col > b:vlog_max_col
+                call add(aft_arg, signal_line)
+                let signal_line = b:vlog_arg_margin. inputs[signal_index] . ", "
                 let input_col = 3 + strlen(inputs[signal_index])
              else
                 let signal_line = signal_line . inputs[signal_index] . ", "
                 let input_col = input_col + strlen(inputs[signal_index])
              endif
           endfor
-          call append(line_index, signal_line)
-          let line_index = line_index + 1
-          call append(line_index, "    //Outputs")
-          let line_index = line_index + 1
-          let output_col = 3
-          let signal_line = "    "
+          call add(aft_arg, signal_line)
+          call add(aft_arg, "")
+          call add(aft_arg, b:vlog_arg_margin."//Outputs")
+          let output_col = len(b:vlog_arg_margin)
+          let signal_line = b:vlog_arg_margin
           for signal_index in range(len(outputs)-1)
-             if output_col > max_col
-                call append(line_index, signal_line)
-                let line_index = line_index + 1
-                let signal_line = "    " . outputs[signal_index] . ", "
-                let output_col = 3 + strlen(outputs[signal_index])
+             if output_col > b:vlog_max_col
+                call add(aft_arg, signal_line)
+                let signal_line = b:vlog_arg_margin . outputs[signal_index] . ", "
+                let output_col = len(b:vlog_arg_margin) + strlen(outputs[signal_index])
              else
                 let signal_line = signal_line . outputs[signal_index] . ", "
                 let output_col = output_col + strlen(outputs[signal_index])
              endif
           endfor
           let signal_line = signal_line . outputs[len(outputs)-1] . ");"
-          call append(line_index, signal_line)
-          return 1
+          call add(aft_arg, signal_line)
+       elseif line =~ '^\s*\<endmodule\>'
+          call add(aft_arg, line)
+          break
        else
-          let line_index = line_index + 1
+          call add(aft_arg, line)
        endif
-     endfor
+    endfor
+    call UpdateBuf(aft_arg)
 endfunction
 
 "===============================================================
@@ -230,7 +380,7 @@ endfunction
 "===============================================================
 function CalMargin(max_len, cur_len)
    let margin = ""
-   for i in range(a:max_len-a:cur_len+1)
+   for i in range(1, a:max_len-a:cur_len+1, 1)
       let margin = margin." "
    endfor
    return margin
@@ -246,121 +396,102 @@ function KillAutoInst()
          call add(aft_kill, line)
          let line_index = line_index + 1
          let line = getline(line_index)
-         while line !~ ');$'
+         while line !~ ');$' && line_index < line("$")
             let line_index = line_index + 1
             let line = getline(line_index)
          endwhile
          let line_index = line_index + 1
+      elseif line =~ '^\s*\<endmodule\>'
+         call add(aft_kill, line)
+         break
       else
          call add(aft_kill, line)
          let line_index = line_index + 1
       endif
    endwhile
-   if len(aft_kill) < line("$")
-      for line_index in range(1, line("$"), 1)
-         if line_index > len(aft_kill)
-            call setline(line_index, "")
-         else
-            call setline(line_index, aft_kill[line_index-1])
-         endif
-      endfor
-   else
-      for line_index in range(1, len(aft_kill), 1)
-         call setline(line_index, aft_kill[line_index-1])
-      endfor
-   endif
+   call UpdateBuf(aft_kill)
 endfunction
 
 function AutoInst()
    let aft_inst = []
-   let insts = []
-   let inst_file = ""
-   let line_inst= ""
+   let max_len = []
+   let insts = GetInsts()
+   if insts == {}
+      echo "No Instance found!"
+      return
+   endif
    call KillAutoInst()
-   let vc_file = substitute(expand("%"), '\.\(v\|sv\)$', ".vc", "")
    for line in getline(1, line("$"))
       if line =~ '(/\*\<\(autoinst\|AUTOINST\)\>\s*\*/)\s*;.*$'
-         let insts = split(line)
-         let inst_name = insts[0]
-         let vc_file = findfile(vc_file)
-         if vc_file == ""
-            let inst_file = inst_name . ".v"
+         let tmp = split(line)
+         let inst_name = tmp[0]
+         if has_key(insts, inst_name)
+            let inst_file = insts[inst_name]
          else
-            for insts in readfile(vc_file)
-               let tmp = substitute(insts, '.*/', "", "g")
-               if tmp == (inst_name . ".v")
-                  let inst_file = insts
-               endif
-            endfor
-         endif
-         if inst_file == ""
-            let inst_file = inst_name . ".v"
+            echo "Has not found the instance: ".inst_name."'s file!"
+            return
          endif
          let inst_input = {}
          let inst_output = {}
-         let max_len = 0
-         for line_inst in readfile(inst_file)
-            if line_inst =~ '^\s*\<input\>\s*\['
-               let line_inst = substitute(line_inst, '^\s*\<input\>\s*', "", "")
-               let line_inst = substitute(line_inst, ';\.*$', "", "")
-               let port = split(line_inst)
-               if max_len < len(port[1])
-                  let max_len = len(port[1])
-               endif
-               call extend(inst_input, {port[1] : port[0]}, "force")
-            elseif line_inst =~ '^\s*\<input\>'
-               let line_inst = substitute(line_inst, '^\s*\<input\>\s*', "", "")
-               let port_name = substitute(line_inst, ';\.*$', "", "")
-               if max_len < len(port_name)
-                  let max_len = len(port_name)
-               endif
-               call extend(inst_input, {port_name : ''}, "force")
-            elseif line_inst =~ '^\s*\<output\>\s*\['
-               let line_inst = substitute(line_inst, '^\s*\<output\>\s*', "", "")
-               let line_inst = substitute(line_inst, ';\s*$', "", "")
-               let port = split(line_inst)
-               if max_len < len(port[1])
-                  let max_len0 = len(port[1])
-               endif
-               call extend(inst_output, {port[1] : port[0]}, "force")
-            elseif line_inst =~ '^\s*\<output\>'
-               let line_inst = substitute(line_inst, '^\s*\<output\>\s*', "", "")
-               let port_name = substitute(line_inst, ';\.*$', "", "")
-               if max_len < len(port_name)
-                  let max_len = len(port_name)
-               endif
-               call extend(inst_output, {port_name : ''}, "force")
-            endif
-         endfor
+         let prefix_max_len = 0
+         let suffix_max_len = 0
+         let lines = Filter(readfile(inst_file))
+         let max_len = GetIO(lines, inst_input, inst_output)
+         let prefix_max_len = max_len[0]
+         let suffix_max_len = max_len[1]
          let line = substitute(line, ');\s*', "", "")
          call add(aft_inst, line)
-         call add(aft_inst, "        //Inputs")
+         call add(aft_inst, b:vlog_inst_margin."//Inputs")
          for ports in keys(inst_input)
-            let margin = CalMargin(max_len, len(ports))
-            call add(aft_inst, "        .".ports.margin."(".ports.inst_input[ports]."),")
+            let prefix_margin = CalMargin(prefix_max_len, len(ports))
+            let suffix_margin = CalMargin(suffix_max_len, len(ports)+len(inst_input[ports]))
+            call add(aft_inst, b:vlog_inst_margin.".".ports.prefix_margin."(".ports.inst_input[ports].suffix_margin."),")
          endfor
-         call add(aft_inst, "        //Outputs")
+         call add(aft_inst, b:vlog_inst_margin."//Outputs")
          for ports in keys(inst_output)
-            let margin = CalMargin(max_len, len(ports))
-            call add(aft_inst, "        .".ports.margin."(".ports.inst_output[ports]."),")
+            let prefix_margin = CalMargin(prefix_max_len, len(ports))
+            let suffix_margin = CalMargin(suffix_max_len, len(ports)+len(inst_output[ports]))
+            call add(aft_inst, b:vlog_inst_margin.".".ports.prefix_margin."(".ports.inst_output[ports].suffix_margin."),")
          endfor
          let line = remove(aft_inst, -1)
          let line = substitute(line, "),", "));", "")
          call add(aft_inst, line)
+      elseif line =~ '^\s*\<endmodule\>'
+         call add(aft_inst, line)
+         break
       else
          call add(aft_inst, line)
       endif
    endfor
-   for line_index in range(1, len(aft_inst), 1)
-      call setline(line_index, aft_inst[line_index-1])
-   endfor
+   call UpdateBuf(aft_inst)
 endfunction
+
 "===============================================================
 "        Automatic Signal Definition Generation
 "===============================================================
-function PushSignal(signals, signal_name, signal_msb, signal_width, max_len)
+function UserDef(lines)
+   let user_def = {}
+   for line in a:lines
+      if line =~ '^\s*\<output\>\s*\<reg\>' || line =~ '^\s*\<output\>\s*\<signed\>'
+         let line = substitute(line, '\s*[;,)].*$', "", "")
+         let signal_name = matchstr(line, '\(\]\|\s\)\w\+$')
+         let signal_name = substitute(signal_name, '^\(\]\|\s\)', "", "")
+         call extend(user_def, {signal_name : ''})
+      elseif line =~ '^\s*\(\<wire\>\|\<reg\>\)'
+         let signal_name = substitute(line, '\s*;.*$', "", "")
+         let signal_name = matchstr(signal_name, '\(\]\|\s\)\w\+$')
+         let signal_name = substitute(signal_name, '^\(\]\|\s\)', "", "")
+         call extend(user_def, {signal_name : line})
+      endif
+   endfor
+   return user_def
+endfunction
+
+function PushSignal(signals, signal_name, signal_msb, signal_width, max_len, user_def)
+   if has_key(a:user_def, a:signal_name) == 1
+      return a:max_len
    " Signal width comes from the right part of the assignmnet
-   if a:signal_msb == ""
+   elseif a:signal_msb == ""
       if has_key(a:signals, a:signal_name) == 1
          if a:signals[a:signal_name] =~ '\d\+'
             if str2nr(a:signals[a:signal_name], 10) < (a:signal_width-1)
@@ -390,6 +521,17 @@ function PushSignal(signals, signal_name, signal_msb, signal_width, max_len)
       return len(a:signal_width) + 4
    else
       return a:max_len
+endfunction
+
+function GetInstExpress(insts)
+   if a:insts == []
+      return '^//'
+   let express = '^\s*\<\('
+   for i in range(0, len(a:insts)-2, 1)
+      let express = express.a:insts[i].'\|'
+   endfor
+   let express = express.a:insts[len(a:insts)-1].'\)\>'
+   return express
 endfunction
 
 function KillAutoDef()
@@ -437,13 +579,20 @@ function AutoDef()
    let signal_msb = ""
    let signal_width = ""
    call KillAutoDef()
+   let insts = GetInsts()
+   let inst_express = GetInstExpress(keys(insts))
+   let lines = Filter(getline(1, line("$")))
+   " Find Signals Declared by User
+   let user_def = UserDef(lines)
    " Get Flip-flop Reg Signals
-   while line_index <= line("$")
-      let line = getline(line_index)
+   while line_index <= len(lines)
+      let line = lines[line_index-1]
       if line =~ '^\s*\<always\>\s*@\s*(\s*\<\(posedge\|negedge\)\>'
          let line_index = line_index + 1
-         let line = getline(line_index)
-         while line !~ '^\s*\<always\>' && line !~ '^\s*\<assign\>' && line !~ '^\s*\<function\>'
+         let line = lines[line_index-1]
+         " Break meet another always block, assign statement or instance
+         while line !~ '^\s*\<always\>' && line !~ '^\s*\<assign\>' && line !~ '^\<end\>'
+                    \&& line !~ '^\s*\<endmodule\>'
             " Remove if(...)
             let line = substitute(line, '\<if\>\s*(.*)', " ", "")
             " Remove ... ?
@@ -458,37 +607,38 @@ function AutoDef()
                let line = substitute(line, '\(;\|:\)$', "", "")
                let signal_name = substitute(line, '\s*<=.*', "", "")
                " Match signal[M:N]
-               if signal_name =~ ':.*\]$'
+               if signal_name =~ ':.*]$'
                   let signal_msb = substitute(signal_name, '\s*:.*$', "", "")
-                  let signal_msb = substitute(signal_msb, '^.*\[\s*', "", "")
-                  let signal_name = substitute(signal_name, '\[.*$', "", "")
-                  let max_len = PushSignal(ff_reg, signal_name, signal_msb, "", max_len)
+                  let signal_msb = substitute(signal_msb, '^.*[\s*', "", "")
+                  let signal_name = substitute(signal_name, '[.*$', "", "")
+                  let max_len = PushSignal(ff_reg, signal_name, signal_msb, "", max_len, user_def)
                " Match signal <= M'hN or #1 M'dN or # `RD M'bN;
                elseif line =~ "^\\s*\\w\\+\\s*<=\\s*\\(#\\s*'*\\w*\\)*\\s\\+\\d\\+'\\(b\\|h\\|d\\).*"
-                  let signal_width = substitute(line, "^\\s*\\w\\+\\s*<=\\s*#\\s*'*\\w*\\s\\+", "", "")
+                  let signal_width = substitute(line, "^\\s*\\w\\+\\s*<=\\s*\\(#\\s*'*\\w*\\)*\\s\\+", "", "")
                   let signal_width = substitute(signal_width, "'\\(b\\|h\\|d\\).*", "", "")
                   " delete [N]
-                  let signal_name = substitute(signal_name, '\[.*$', "", "")
-                  let max_len = PushSignal(ff_reg, signal_name, "", signal_width, max_len)
+                  let signal_name = substitute(signal_name, '[.*$', "", "")
+                  let max_len = PushSignal(ff_reg, signal_name, "", signal_width, max_len, user_def)
                " Match signal[N]
-               elseif signal_name =~ '\[\w\+\]$'
-                  let signal_msb = substitute(signal_name, '\]$', "", "")
-                  let signal_msb = substitute(signal_msb, '^.*\[', "", "")
-                  let signal_name = substitute(signal_name, '\[.*$', "", "")
-                  let max_len = PushSignal(ff_reg, signal_name, signal_msb, "", max_len)
+               elseif signal_name =~ '\[.\+\]$'
+                  let signal_msb = substitute(signal_name, ']$', "", "")
+                  let signal_msb = substitute(signal_msb, '^.*[', "", "")
+                  let signal_name = substitute(signal_name, '[.*$', "", "")
+                  let max_len = PushSignal(ff_reg, signal_name, signal_msb, "", max_len, user_def)
                else
-                  let max_len = PushSignal(ff_reg, signal_name, "", 1, max_len)
+                  let max_len = PushSignal(ff_reg, signal_name, "", 1, max_len, user_def)
                endif
             endif
             let line_index = line_index + 1
-            let line = getline(line_index)
+            let line = lines[line_index-1]
          endwhile
          let line_index = line_index - 1
       " Get Combinational Reg Signals
       elseif line =~ '^\s*\<always\>'
          let line_index = line_index + 1
-         let line = getline(line_index)
-         while line !~ '^\s*\<always\>' && line !~ '^\s*\<assign\>' && line !~ '^\s*\<function\>'
+         let line = lines[line_index-1]
+         while line !~ '^\s*\<always\>' && line !~ '^\s*\<assign\>' && line !~ '^\<end\>'
+                   \&& line !~ '^\s*\<endmodule\>'
              " Remove if(...)
             let line = substitute(line, '\<if\>\s*(.*)', " ", "")
             " Remove ... ?
@@ -498,39 +648,39 @@ function AutoDef()
             " Remove )
             let line = substitute(line, ")", "", "g")
             if line =~ '.*=.*'
-               let line = matchstr(line, '\s\+\w\+\(\[.*\]\)*\s*=.*\(;\|:\)')
+               let line = matchstr(line, '\s\+\w\+\(\[.*\]\)*\s*=.*\(;\|:\)*')
                let line = substitute(line, '^\s*', "", "")
                let line = substitute(line, '\(;\|:\)$', "", "")
                let signal_name = substitute(line, '\s*=.*', "", "")
                " Match signal[M:N]
-               if signal_name =~ ':.*\]$'
+               if signal_name =~ ':.*]$'
                   let signal_msb = substitute(signal_name, '\s*:.*$', "", "")
-                  let signal_msb = substitute(signal_msb, '^.*\[\s*', "", "")
-                  let signal_name = substitute(signal_name, '\[.*$', "", "")
-                  let max_len = PushSignal(comb_reg, signal_name, signal_msb, "", max_len)
+                  let signal_msb = substitute(signal_msb, '^.*[\s*', "", "")
+                  let signal_name = substitute(signal_name, '[.*$', "", "")
+                  let max_len = PushSignal(comb_reg, signal_name, signal_msb, "", max_len, user_def)
                " Match signal = M'hN;
                elseif line =~ "^\\s*\\w\\+\\s*=\\s*\\d\\+'\\\(b\\|h\\|d\\).*"
                   let signal_width = substitute(line, '^\s*\w\+\s*=\s*', "", "")
                   let signal_width = substitute(signal_width, "'\\(b\\|h\\|d\\).*", "", "")
-                  let signal_name = substitute(signal_name, '\[.*$', "", "")
-                  let max_len = PushSignal(comb_reg, signal_name, "", signal_width, max_len)
+                  let signal_name = substitute(signal_name, '[.*$', "", "")
+                  let max_len = PushSignal(comb_reg, signal_name, "", signal_width, max_len, user_def)
                " Match signal[N]
                elseif signal_name =~ '\[\w\+\]$'
-                  let signal_msb = substitute(signal_name, '\]$', "", "")
-                  let signal_msb = substitute(signal_msb, '^.*\[', "", "")
-                  let signal_name = substitute(signal_name, '\[.*$', "", "")
-                  let max_len = PushSignal(comb_reg, signal_name, signal_msb, "", max_len)
+                  let signal_msb = substitute(signal_name, ']$', "", "")
+                  let signal_msb = substitute(signal_msb, '^.*[', "", "")
+                  let signal_name = substitute(signal_name, '[.*$', "", "")
+                  let max_len = PushSignal(comb_reg, signal_name, signal_msb, "", max_len, user_def)
                else
-                  let max_len = PushSignal(comb_reg, signal_name, "", 1, max_len)
+                  let max_len = PushSignal(comb_reg, signal_name, "", 1, max_len, user_def)
                endif
             endif
             let line_index = line_index + 1
-            let line = getline(line_index)
+            let line = lines[line_index-1]
          endwhile
          let line_index = line_index - 1
       " Get Wires
       elseif line =~ '^\s*\<assign\>'
-         let line = substitute(line, '\s\+\[^()\s]\+\s*?', " ", "g")
+         let line = substitute(line, '\s\+[^()\s]\+\s*?', " ", "g")
          let line = substitute(line, '(.*)\s*?', " ", "g")
          let signal_name = substitute(line, '^\s*\<assign\>\s*', "", "")
          let signal_name = substitute(signal_name, '\s*=.*', "", "g")
@@ -539,56 +689,85 @@ function AutoDef()
             let signal_msb = substitute(signal_name, '\s*:.*$', "", "")
             let signal_msb = substitute(signal_msb, '^.*[\s*', "", "")
             let signal_name = substitute(signal_name, '[.*$', "", "")
-            let max_len = PushSignal(wire, signal_name, signal_msb, "", max_len)
+            let max_len = PushSignal(wire, signal_name, signal_msb, "", max_len, user_def)
          " Match: signal = M'hN;
          elseif line =~ "^\\s*\\<assign\\>\\s*\\w\\+\\s*=\\s*\\d\\+'\\(b\\|h\\|d\\).*"
             let signal_width = substitute(line, '^\s*\<assign\>\s\+\w\+\s*=\s*', "", "")
             let signal_width = substitute(signal_width, "'\\(b\\|h\\|d\\).*", "", "")
             let signal_name = substitute(signal_name, '[.*$', "", "")
-            let max_len = PushSignal(wire, signal_name, "", signal_width, max_len)
+            let max_len = PushSignal(wire, signal_name, "", signal_width, max_len, user_def)
          elseif signal_name =~ '\[\w\+\]$'
-            let signal_msb = substitute(signal_name, '\]$', "", "")
-            let signal_msb = substitute(signal_msb, '^.*\[', "", "")
-            let signal_name = substitute(signal_name, '\[.*$', "", "")
-            let max_len = PushSignal(comb_reg, signal_name, signal_msb, "", max_len)
+            let signal_msb = substitute(signal_name, ']$', "", "")
+            let signal_msb = substitute(signal_msb, '^.*[', "", "")
+            let signal_name = substitute(signal_name, '[.*$', "", "")
+            let max_len = PushSignal(comb_reg, signal_name, signal_msb, "", max_len, user_def)
          else
-            let max_len = PushSignal(wire, signal_name, "", 1, max_len)
+            let max_len = PushSignal(wire, signal_name, "", 1, max_len, user_def)
          endif
          let line_index = line_index + 1
       " Get Instance Ouputs
-      elseif line =~ '/\*\s*\<\(autoinst\|AUTOINST\)\>\s*\*/\s*$'
-         let line_index = line_index + 1
-         let line = getline(line_index)
-         while line !~ ');\s*$'
-            if line =~ '^\s*//\s*\<Outputs\>'
-               let line_index = line_index + 1
-               let line = getline(line_index)
-               while line =~ '^\s*\.'
-                  let line = substitute(line, '^.*(\s*', "", "")
-                  let line = substitute(line, '\s*).*$', "", "")
-                  if line =~ '\]$'
-                     let signal_name = substitute(line, '\[.*$', "", "")
-                     let signal_msb = substitute(line, '^.*\[', "", "")
-                     let signal_msb = substitute(signal_msb, '\s*:.*$', "", "")
-                     let max_len = PushSignal(inst_wire, signal_name, signal_msb, "", max_len)
+      elseif line =~ inst_express && insts != []
+         let inst_name = matchstr(line, '^\s*\w\+')
+         let inst_name = substitute(inst_name, '^\s*', "", "")
+         if insts == {}
+            echo "No Instances have been indicated!"
+            return
+         elseif has_key(insts, inst_name)
+            let inst_lines = readfile(insts[inst_name])
+            let inst_inputs = {}
+            let inst_outputs = {}
+            call GetIO(inst_lines, inst_inputs, inst_outputs)
+         else
+            echo "Instance ".inst_name."'s file path does not indicate!"
+            return
+         endif
+         " If there is port declaration
+         if line =~ '^.*\.'
+            let line = substitute(line, '^[^.]*\.', ".", "")
+         " Read next line
+         else
+            let line_index = line_index + 1
+            let line = lines[line_index-1]
+         endif
+         while line !~ '^\s*);.*'
+            if line =~ '^.*\.'
+               let inst_port = matchstr(line, '^\s*\.\w\+\s*(')
+               let inst_port = substitute(inst_port, '^\s*\.', "", "")
+               let inst_port = substitute(inst_port, '\s*($', "", "")
+               let line = substitute(line, '^\s*\.\w\+\s*(\s*', "", "")
+               let inst_net = matchstr(line, '^[^)]*)')
+               let inst_net = substitute(inst_net, '\s*)', "", "")
+               let line = substitute(line, '^[^)]*),*\s*', "", "")
+               if has_key(inst_outputs, inst_port)
+                  let net_name = substitute(inst_net, '[.*$', "", "")
+                  let inst_net = substitute(inst_net, '^.*[', "[", "")
+                  if net_name == inst_net
+                     let max_len = PushSignal(inst_wire, net_name, "", 1, max_len, user_def)
                   else
-                     let signal_name = line
-                     let max_len = PushSignal(inst_wire, signal_name, "", 1, max_len)
+                     let inst_net = substitute(inst_net, ':.*$', "", "")
+                     let inst_net = substitute(inst_net, '].*$', "", "")
+                     let inst_net = substitute(inst_net, '^[', "", "")
+                     let max_len = PushSignal(inst_wire, net_name, inst_net, "", max_len, user_def)
                   endif
+               endif
+               if line =~  '^\s*);'
+                  break
+               elseif line !~ '^.*\.'
                   let line_index = line_index + 1
-                  let line = getline(line_index)
-               endwhile
-               let line_index = line_index - 1
-               let line = getline(line_index)
+                  let line = lines[line_index-1]
+               endif
             else
                let line_index = line_index + 1
-               let line = getline(line_index)
+               let line = lines[line_index-1]
             endif
-         endwhile
+         endwhile 
          let line_index = line_index + 1
+         let line = lines[line_index-1]
+      elseif line =~ '^\s*\<endmodule\>'
+         break
       else
          let line_index = line_index + 1
-         let line = getline(line_index)
+         let line = lines[line_index-1]
       endif
    endwhile
    for line in getline(1, line("$"))
@@ -631,6 +810,15 @@ function AutoDef()
             endif
          endfor
          call add(aft_def, "// End of automatic define")
+         if user_def != {}
+            for defined in sort(keys(user_def))
+               if user_def[defined] != ""
+                  call add(aft_def, user_def[defined])
+               endif
+            endfor
+         endif
+      elseif line =~ '^\s*\<\(wire\|reg\)\>'
+         call add(aft_def, "")
       else
          call add(aft_def, line)
       endif
@@ -638,4 +826,223 @@ function AutoDef()
    for line_index in range(1, len(aft_def), 1)
       call setline(line_index, aft_def[line_index-1])
    endfor
+endfunction
+
+"===============================================================
+"        Automatic Sensitive List Generation
+"===============================================================
+function KillAutoSense()
+   let line_index = 0
+   let aft_kill = []
+   while line_index <= line("$")
+      let line = getline(line_index)
+      if line =~ '^\s*\<always\>\s*@\s*(\s*/\*\s*\<autosense\>'
+         if line =~ ').*$'
+            let line = substitute(line, '^.*)', "", "")
+            call add(aft_kill, "always @(/*autosense*/)".line)
+         else
+            while line !~ ').*$' && line_index <= line("$")
+               let line_index = line_index + 1
+               let line = getline(line_index)
+            endwhile
+            if line !~ ').*$'
+               echo "No ) found!"
+               return
+            else
+               let line = substitute(line, '^.*)', "", "")
+               call add(aft_kill, "always @(/*autosense*/)".line)
+            endif
+         endif
+         let line_index = line_index + 1
+      else
+         call add(aft_kill, line)
+         let line_index = line_index + 1
+      endif
+   endwhile
+   if len(aft_kill) < line("$")
+      for line_index in range(1, line("$"), 1)
+         if line_index > len(aft_kill)
+            call setline(line_index, "")
+         else
+            call setline(line_index, aft_kill[line_index-1])
+         endif
+      endfor
+   else
+      for line_index in range(1, len(aft_kill), 1)
+         call setline(line_index, aft_kill[line_index-1])
+      endfor
+   endif      
+endfunction
+
+function GetPars()
+   let parameters = []
+   let line_index = 0
+   while line_index <= line("$")
+      let line = getline(line_index)
+      if line =~ '^\s*\<parameter\>'
+         while line !~ ';.*$'
+            let line = substitute(line, '^\s*\(\<parameter\>\)*\s*', "", "")
+            let line = substitute(line, '\s*=.*$', "", "")
+            if line != ""
+               call add(parameters, line)
+            endif
+            let line_index = line_index + 1
+            let line = getline(line_index)
+         endwhile
+         let line = substitute(line, '^\s*\(\<parameter\>\)*\s*', "", "")
+         let line = substitute(line, '\s*=.*$', "", "")
+         if line != ""
+            call add(parameters, line)
+         endif
+         let line_index = line_index + 1
+         let line = getline(line_index)
+      else
+         let line_index = line_index + 1
+      endif
+   endwhile
+   return parameters
+endfunction
+
+function GetFuns()
+   let funs = []
+   let line_index = 0
+   let line = ""
+   while line_index <= line("$") && line !~ '^\s*\<endmodule\>'
+      let line = getline(line_index)
+      if line =~ '^\s*\<function\>\s*'
+         let line = substitute(line, '^\s*\<function\>\s*', "", "")
+         let line = substitute(line, ';.*$', "", "")
+         let line = substitute(line, '^\s\+(.*$', "", "")
+         if line != ""
+            call add(funs, line)
+         endif
+      endif
+      let line_index = line_index + 1
+   endwhile
+   return funs
+endfunction
+
+function AutoSense()
+   let line_index = 1
+   let vlog_keys = '\(\<if\>\|\<else\>\|\<case\>\|\<casex\>\|\<casez\>\|\<begin\>\|\<end\>\|\<endcase\>\|\<default\>\)'
+   let vlog_opts = '[=<>!~\^\-+*?:|&{}%(;),]'
+   let vlog_const0 = "\\s\\+\\d\\+'[bBdDhHoO][0-9a-fA-F_xzXZ]\\+\\s"
+   let vlog_const1 = '\s\+\d\+\s'
+   let vlog_pars = []
+   let vlog_funs = []
+   let inputs = []
+   let sense_list = []
+   call KillAutoSense()
+   let insts = GetInsts()
+   let inst_express = GetInstExpress(keys(insts))
+   let lines = Filter(getline(1, line("$")))
+   let vlog_pars = GetPars()
+   while line_index <= len(lines)
+      let line = lines[line_index-1]
+      if line =~ '^\s*\<always\>\s*@\s*(\s*/\*\s*\<autosense\>\s*\*/)'
+         let inputs = []
+         let line_index = line_index + 1
+         let line = lines[line_index-1]
+         while line !~ '^\s*\<always\>' && line !~ '^\s*\<assign\>' && line !~ inst_express
+                   \  && line !~ '^\s*\<endmodule\>'
+            " Remove [*]
+            let line = substitute(line, '\[[^\[\]]*\]', "", "g")
+            " Remove the left part
+            let left_part = substitute(line, '\<if\>\s*(.*)', " ", "")
+            let left_part = substitute(left_part, '([^()]*)', " ", "g")
+            let left_part = substitute(left_part, '\s\+\w\+\s\+?', " ", "g")
+            let left_part = substitute(left_part, '([^()]*)\s*?', " ", "g")
+            let left_part = matchstr(left_part, '^.*=')
+            let line = strpart(line, len(left_part))
+            let line = line." "
+            " Remove parameters
+            if vlog_pars != []
+               for pars in vlog_pars
+                  let line = substitute(line, pars, "", "g")
+               endfor
+            endif
+            " Remove Verilog Defines, Constants, Key Words and Operators
+            let line = substitute(line, vlog_opts, " ", "g")            
+            let line = substitute(line, vlog_const0, " ", "g")
+            let line = substitute(line, vlog_const1, " ", "g")
+            let line = substitute(line, "\\s\\+`\\w\\+\\s\\+", " ", "g")
+            let line = substitute(line, vlog_keys, "", "g")
+            " Get Inputs
+            let input_items = split(line)
+            if input_items != []
+               for input_item in input_items
+                  if count(inputs, input_item) == 0
+                     call add(inputs, input_item)
+                  endif
+               endfor
+            endif
+            let line_index = line_index + 1
+            let line = lines[line_index-1]
+         endwhile
+         let line_index = line_index - 1
+         call extend(sense_list, inputs)
+         call add(sense_list, "|")
+      else
+         let line_index = line_index + 1
+      endif
+   endwhile
+   let line_index = 1
+   let aft_sense = []
+   let list_line = ""
+   let margin = "        "
+   let list_index = 0
+   while line_index <= line("$")
+      let line = getline(line_index)
+      if line =~ '^\s*\<always\>\s*@\s*(\s*/\*\s*\<autosense\>\s*\*/)'
+         let tmp = matchstr(line, ').*$')
+         let line = substitute(line, ').*$', "", "")
+         let list_line = ""
+         "call add(aft_sense, line)
+         let line_col = 20
+         let list_item = sense_list[list_index]
+         while list_item != "|"
+            if list_line != ""
+               let list_line = list_line." or ".list_item
+            else
+               let list_line = line.list_item
+            endif
+            let line_col = line_col - len(list_item)
+            if line_col < 0
+               call add(aft_sense, list_line)
+               let list_line = ""
+               let line_col = 30
+               let line = margin." or "
+            endif
+            let list_index = list_index + 1
+            let list_item = sense_list[list_index]
+         endwhile
+         let list_index = list_index + 1
+         let list_line = list_line.tmp
+         call add(aft_sense, margin.list_line)
+      else
+         call add(aft_sense, line)
+      endif
+      let line_index = line_index + 1
+   endwhile
+   let line_index = 1
+   if len(aft_sense) < line("$")
+      for line_index in range(1, line("$"), 1)
+         if line_index > len(aft_sense)
+            call setline(line_index, "")
+         else
+            call setline(line_index, aft_sense[line_index-1])
+         endif
+      endfor
+   else
+      for line_index in range(1, len(aft_sense), 1)
+         call setline(line_index, aft_sense[line_index-1])
+      endfor
+   endif
+endfunction
+
+function KillAuto()
+   call KillAutoArg()
+   call KillAutoInst()
+   call KillAutoDef()
+   call KillAutoSense()
 endfunction
